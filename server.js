@@ -37,6 +37,8 @@ const PORT = Number(process.env.PORT) || 3000;
 const ROOT = __dirname;
 const MAX_BODY = 4096;
 const STATS_KEY = String(process.env.STATS_KEY || '');
+// Хэш ключа вместо самого ключа: для облака, куда секреты не загружаются.
+const STATS_KEY_SHA256 = String(process.env.STATS_KEY_SHA256 || '');
 const TELEGRAM_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '');
 const TELEGRAM_CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || '');
 const TRACK_WINDOW_MS = 60 * 1000;
@@ -255,6 +257,11 @@ function safeEqual(a, b) {
 }
 
 function statsAllowed(key) {
+  // Хэш-режим: сравниваем sha256-дайджест переданного ключа с заданным хэшем.
+  if (STATS_KEY_SHA256) {
+    const digest = crypto.createHash('sha256').update(String(key || '')).digest('hex');
+    return safeEqual(digest, STATS_KEY_SHA256);
+  }
   if (!STATS_KEY) return false; // без ключа страница выключена
   return safeEqual(key || '', STATS_KEY);
 }
@@ -281,8 +288,10 @@ function rateLimited(ip) {
 function sameOrigin(req) {
   const origin = req.headers.origin;
   if (!origin) return true; // same-origin fetch без Origin (старые браузеры)
+  // За обратным прокси реальный домен приходит в X-Forwarded-Host (Host — внутренний).
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host).split(',')[0].trim();
   try {
-    return new URL(origin).host === req.headers.host;
+    return new URL(origin).host === host;
   } catch {
     return false;
   }
@@ -440,6 +449,6 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, '0.0.0.0', () => {
   console.log('report listening on ' + PORT);
   console.log(`Данные визитов: ${VISITS_FILE}`);
-  console.log(`Статистика: ${STATS_KEY ? '/stats?key=***' : 'выключена (нет STATS_KEY)'}`);
+  console.log(`Статистика: ${STATS_KEY || STATS_KEY_SHA256 ? '/stats?key=***' : 'выключена (нет STATS_KEY)'}`);
   console.log(`Telegram-уведомления: ${TELEGRAM_TOKEN && TELEGRAM_CHAT_ID ? 'включены' : 'выключены (нужны TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID)'}`);
 });
