@@ -1,0 +1,7 @@
+# секреты и локальные данные не должны попадать в репозиторий и публикацию
+.env
+data/
+node_modules/
+*.log
+.opencode/
+opencode.jsonc

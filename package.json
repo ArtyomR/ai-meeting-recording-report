@@ -1,0 +1,14 @@
+{
+  "name": "product-discovery-report",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Одностраничный аналитический отчёт: ИИ-протоколирование переговоров в России",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/track.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
