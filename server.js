@@ -81,7 +81,7 @@ const CSP = [
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com",
   "img-src 'self' data:",
-  "connect-src 'self'",
+  "connect-src 'self' https://ipwho.is https://get.geojs.io",
   "base-uri 'none'",
   "form-action 'none'",
   "frame-ancestors 'self' https://*.bitrix24.tech"
@@ -115,8 +115,10 @@ const esc = (s) => String(s === undefined || s === null ? '' : s).replace(/[&<>"
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
 ));
 
+// CGNAT 100.64.0.0/10 — внутренние адреса прокси платформы, не публичные.
 const isPrivateIp = (ip) => !ip || ip === '—'
-  || /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|::1$|f[cd]|fe80)/i.test(ip);
+  || /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|::1$|f[cd]|fe80)/i.test(ip)
+  || /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip);
 const isLoopback = (ip) => /^(127\.|::1$)/i.test(ip || '');
 
 // Реальный IP посетителя: первый публичный адрес из прокси-заголовков, иначе сокет.
@@ -126,20 +128,24 @@ function clientIp(req) {
   for (const h of ['x-real-ip', 'cf-connecting-ip', 'true-client-ip', 'fly-client-ip', 'x-client-ip']) {
     if (req.headers[h]) candidates.push(String(req.headers[h]));
   }
+  if (req.headers['forwarded']) {
+    const m = String(req.headers['forwarded']).match(/for=([^;,\s]+)/i);
+    if (m) candidates.push(m[1]);
+  }
   candidates.push(req.socket.remoteAddress || '');
   const ips = candidates
-    .map((s) => String(s).trim().replace(/^::ffff:/, ''))
+    .map((s) => String(s).trim().replace(/^::ffff:/, '').replace(/^for="?/, '').replace(/"$/, ''))
     .filter((ip) => net.isIP(ip) === 4 || net.isIP(ip) === 6);
   return ips.find((ip) => !isPrivateIp(ip)) || ips[0] || '—';
 }
 
 // Гео по IP. Во внешний сервис уходит только валидный публичный IPv4 —
-// это исключает SSRF через подменённые заголовки.
+// это исключает SSRF через подменённые заголовки. ipwho.is → ip-api.com (резерв).
 async function geoLookup(ip) {
   if (isLoopback(ip)) return { country: 'локально', city: '', flag: '🏠' };
   if (net.isIP(ip) !== 4 || isPrivateIp(ip)) return null;
   try {
-    const r = await fetch(`https://ipwho.is/${encodeURIComponent(ip)}`, {
+    const r = await fetch(`https://ipwho.is/${encodeURIComponent(ip)}?lang=ru`, {
       signal: AbortSignal.timeout(GEO_TIMEOUT_MS)
     });
     const j = await r.json();
@@ -150,7 +156,16 @@ async function geoLookup(ip) {
         flag: clip(j.flag && j.flag.emoji, 8)
       };
     }
-  } catch { /* гео не критично */ }
+  } catch { /* пробуем резерв */ }
+  try {
+    const r = await fetch(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,country,city&lang=ru`, {
+      signal: AbortSignal.timeout(GEO_TIMEOUT_MS)
+    });
+    const j = await r.json();
+    if (j && j.status === 'success') {
+      return { country: clip(j.country, 60), city: clip(j.city, 60), flag: '' };
+    }
+  } catch { /* гео не вышло */ }
   return null;
 }
 
@@ -226,7 +241,7 @@ function statsPage() {
       <td>${esc(geo || '—')}</td>
       <td>${esc(v.path || '/')}</td>
       <td>${esc(v.ua)}</td>
-      <td>${esc(v.ref || '—')}</td>
+      <td>${esc(v.ref || 'прямая ссылка')}</td>
       <td>${esc(v.screen || '—')} / ${esc(v.lang || '—')} / ${esc(v.tz || '—')}</td>
     </tr>`;
   }).join('');
@@ -243,7 +258,7 @@ function statsPage() {
 </style></head><body><div class="wrap">
 <h1>Статистика посещений</h1>
 <p>Всего визитов: <span class="n">${visits.length}</span> (показаны последние ${Math.min(visits.length, 500)}).</p>
-<table><tr><th>Время</th><th>IP</th><th>Гео</th><th>Страница</th><th>Устройство (User-Agent)</th><th>Откуда пришёл</th><th>Экран / язык / часовой пояс</th></tr>
+  <table><tr><th>Время</th><th>IP</th><th>Гео</th><th>Страница</th><th>Устройство (User-Agent)</th><th>Откуда пришёл</th><th>Экран / язык / часовой пояс</th></tr>
 ${rows || '<tr><td colspan="7" style="color:#8a93a1">Пока никто не открывал отчёт</td></tr>'}
 </table></div></body></html>`;
 }
@@ -346,10 +361,23 @@ function handleTrack(req, res) {
 
     // Гео и уведомление — после ответа клиенту, чтобы не тормозить страницу.
     (async () => {
-      const geo = await geoLookup(row.ip);
-      if (geo) {
-        row.country = geo.country || '';
-        row.city = geo.city || '';
+      let flag = '';
+      const g = payload.geo || {};
+      if (g.ip && !isPrivateIp(g.ip)) {
+        // Браузер посетителя сам прислал свой внешний IP и гео: за прокси
+        // платформы сервер видит только внутренние адреса.
+        row.ip = clip(g.ip, 45);
+        row.country = clip(g.country || '', 60);
+        row.city = clip(g.city || '', 60);
+        flag = clip(g.flag || '', 8);
+      } else {
+        // Фолбэк: серверная гео (реальный IP есть при локальном запуске).
+        const geo = await geoLookup(row.ip);
+        if (geo) {
+          row.country = geo.country || '';
+          row.city = geo.city || '';
+          flag = geo.flag || '';
+        }
       }
       try {
         appendVisit(row);
@@ -367,8 +395,8 @@ function handleTrack(req, res) {
       if (now - prev < NOTIFY_COOLDOWN_MS) return; // не спамим при перезагрузке
       lastNotify.set(row.ip, now);
 
-      const geoText = geo && (geo.city || geo.country)
-        ? `${geo.flag ? geo.flag + ' ' : ''}${[geo.city, geo.country].filter(Boolean).join(', ')}`
+      const geoText = (row.city || row.country)
+        ? `${flag ? flag + ' ' : ''}${[row.city, row.country].filter(Boolean).join(', ')}`
         : 'не определено';
       const { device, os } = deviceInfo(ua);
       sendTelegram(
@@ -438,7 +466,7 @@ const server = http.createServer((req, res) => {
       ...HEADERS,
       'Content-Type': entry.type,
       'Content-Length': stat.size,
-      'Cache-Control': entry.type.startsWith('text/html') ? 'no-store' : 'public, max-age=3600'
+      'Cache-Control': entry.type.startsWith('text/html') ? 'no-store' : 'public, max-age=300'
     });
 
     if (req.method === 'HEAD') return res.end();

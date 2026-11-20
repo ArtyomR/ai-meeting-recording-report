@@ -90,19 +90,41 @@
       try {
         tz = (Intl.DateTimeFormat().resolvedOptions() || {}).timeZone || '';
       } catch (e) { /* старый браузер без Intl — отправляем без часового пояса */ }
-      var body = JSON.stringify({
+      var payload = {
         path: location.pathname,
         ref: document.referrer || '',
         screen: window.screen ? screen.width + 'x' + screen.height : '',
         lang: navigator.language || '',
         tz: tz
-      });
-      fetch('/track', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: body,
-        keepalive: true
-      }).catch(function () { /* статистика не должна ломать страницу */ });
+      };
+      // Внешний IP и гео узнаёт браузер: за прокси платформы сервер видит
+      // только внутренние адреса. ipwho.is, при неудаче — geojs.io (оба с CORS).
+      var geoOpts = (typeof AbortSignal !== 'undefined' && AbortSignal.timeout)
+        ? { signal: AbortSignal.timeout(4000) } : {};
+      fetch('https://ipwho.is/?lang=ru', geoOpts)
+        .then(function (r) { return r.json(); })
+        .then(function (g) {
+          if (g && g.success) {
+            payload.geo = { ip: g.ip, country: g.country || '', city: g.city || '', flag: (g.flag && g.flag.emoji) || '' };
+          }
+        })
+        .catch(function () {
+          return fetch('https://get.geojs.io/v1/ip/geo.json', geoOpts)
+            .then(function (r) { return r.json(); })
+            .then(function (g) {
+              if (g && g.ip) payload.geo = { ip: g.ip, country: g.country || '', city: g.city || '', flag: '🌍' };
+            })
+            .catch(function () { /* гео не критично */ });
+        })
+        .then(function () {
+          return fetch('/track', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+            keepalive: true
+          });
+        })
+        .catch(function () { /* статистика не должна ломать страницу */ });
     }
   } catch (e) { /* приватный режим без storage */ }
 })();

@@ -55,7 +55,8 @@ test('POST /track принимает визит, отвечает 204 и пиш�
       ref: 'https://example.com/source',
       screen: '1920x1080',
       lang: 'ru-RU',
-      tz: 'Europe/Moscow'
+      tz: 'Europe/Moscow',
+      geo: { ip: '203.0.113.7', country: 'Россия', city: 'Москва', flag: '🇷🇺' }
     })
   });
   assert.strictEqual(res.status, 204);
@@ -67,7 +68,9 @@ test('POST /track принимает визит, отвечает 204 и пиш�
   assert.strictEqual(row.path, '/');
   assert.strictEqual(row.ref, 'https://example.com/source');
   assert.strictEqual(row.lang, 'ru-RU');
-  assert.ok(row.ip, 'ip записан');
+  assert.strictEqual(row.ip, '203.0.113.7', 'ip перезаписан внешним IP от браузера');
+  assert.strictEqual(row.country, 'Россия');
+  assert.strictEqual(row.city, 'Москва');
   assert.strictEqual(row.ua, 'TestAgent/1.0');
 });
 
