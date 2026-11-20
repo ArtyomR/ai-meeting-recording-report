@@ -1,0 +1,2 @@
+# Шелл-скрипты всегда LF, иначе bash на Linux падает с CRLF
+*.sh text eol=lf

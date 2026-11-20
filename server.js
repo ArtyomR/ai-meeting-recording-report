@@ -75,6 +75,15 @@ const FILES = {
   '/icon.svg': { file: 'icon.svg', type: 'image/svg+xml' }
 };
 
+// Название отчёта для Telegram-уведомлений — берём из <title> index.html,
+// чтобы не дублировать его вручную в двух местах.
+const REPORT_TITLE = (() => {
+  try {
+    const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+    return (html.match(/<title>([^<]*)<\/title>/) || [])[1] || '';
+  } catch { return ''; }
+})();
+
 const CSP = [
   "default-src 'self'",
   "script-src 'self'",
@@ -169,19 +178,25 @@ async function geoLookup(ip) {
   return null;
 }
 
-function sendTelegram(text) {
-  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
-  fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: TELEGRAM_CHAT_ID,
-      text,
-      parse_mode: 'HTML',
-      disable_web_page_preview: true
-    }),
-    signal: AbortSignal.timeout(TELEGRAM_TIMEOUT_MS)
-  }).catch(() => { /* сеть недоступна — визит всё равно записан */ });
+// Возвращает true при доставке (HTTP 2xx), false при сбое — статус попадает
+// в запись визита, потому что логи облака наружу не отдаются.
+async function sendTelegram(text) {
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true
+      }),
+      signal: AbortSignal.timeout(TELEGRAM_TIMEOUT_MS)
+    });
+    return Boolean(r && r.ok);
+  } catch {
+    return false;
+  }
 }
 
 function deviceInfo(ua) {
@@ -243,6 +258,7 @@ function statsPage() {
       <td>${esc(v.ua)}</td>
       <td>${esc(v.ref || 'прямая ссылка')}</td>
       <td>${esc(v.screen || '—')} / ${esc(v.lang || '—')} / ${esc(v.tz || '—')}</td>
+      <td>${esc(v.tg || '—')}</td>
     </tr>`;
   }).join('');
   return `<!doctype html><html lang="ru"><head><meta charset="utf-8">
@@ -258,8 +274,8 @@ function statsPage() {
 </style></head><body><div class="wrap">
 <h1>Статистика посещений</h1>
 <p>Всего визитов: <span class="n">${visits.length}</span> (показаны последние ${Math.min(visits.length, 500)}).</p>
-  <table><tr><th>Время</th><th>IP</th><th>Гео</th><th>Страница</th><th>Устройство (User-Agent)</th><th>Откуда пришёл</th><th>Экран / язык / часовой пояс</th></tr>
-${rows || '<tr><td colspan="7" style="color:#8a93a1">Пока никто не открывал отчёт</td></tr>'}
+  <table><tr><th>Время</th><th>IP</th><th>Гео</th><th>Страница</th><th>Устройство (User-Agent)</th><th>Откуда пришёл</th><th>Экран / язык / часовой пояс</th><th>TG</th></tr>
+${rows || '<tr><td colspan="8" style="color:#8a93a1">Пока никто не открывал отчёт</td></tr>'}
 </table></div></body></html>`;
 }
 
@@ -379,12 +395,6 @@ function handleTrack(req, res) {
           flag = geo.flag || '';
         }
       }
-      try {
-        appendVisit(row);
-      } catch (err) {
-        console.error('[track] не удалось записать визит:', err.code || 'error');
-        return;
-      }
       console.log(`[track] ${row.ts} ip=${row.ip} path=${row.path}`);
 
       const now = Date.now();
@@ -392,22 +402,37 @@ function handleTrack(req, res) {
         for (const [key, ts] of lastNotify) if (now - ts > NOTIFY_COOLDOWN_MS) lastNotify.delete(key);
       }
       const prev = lastNotify.get(row.ip) || 0;
-      if (now - prev < NOTIFY_COOLDOWN_MS) return; // не спамим при перезагрузке
-      lastNotify.set(row.ip, now);
+      const notified = now - prev >= NOTIFY_COOLDOWN_MS; // не спамим при перезагрузке
 
-      const geoText = (row.city || row.country)
-        ? `${flag ? flag + ' ' : ''}${[row.city, row.country].filter(Boolean).join(', ')}`
-        : 'не определено';
-      const { device, os } = deviceInfo(ua);
-      sendTelegram(
-        '👁 <b>Отчёт открыли</b>\n' +
-        `🕒 ${esc(row.ts)} (UTC)\n` +
-        `📍 ${esc(geoText)}\n` +
-        `🌐 IP: <code>${esc(row.ip)}</code>\n` +
-        `📄 Страница: ${esc(row.path)}\n` +
-        `${device} · ${os}\n` +
-        `🔗 Источник: ${esc(row.ref) || 'прямая ссылка'}`
-      );
+      // Telegram: сначала пробуем доставить, статус доставки пишем в визит
+      // (логи облака наружу не отдаются — увидеть его можно только в /stats).
+      if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+        row.tg = 'off';
+      } else if (!notified) {
+        row.tg = 'cooldown';
+      } else {
+        lastNotify.set(row.ip, now);
+        const geoText = (row.city || row.country)
+          ? `${flag ? flag + ' ' : ''}${[row.city, row.country].filter(Boolean).join(', ')}`
+          : 'не определено';
+        const { device, os } = deviceInfo(ua);
+        row.tg = await sendTelegram(
+          '👁 <b>Отчёт открыли</b>\n' +
+          `📊 ${esc(REPORT_TITLE)}\n` +
+          `🕒 ${esc(row.ts)} (UTC)\n` +
+          `📍 ${esc(geoText)}\n` +
+          `🌐 IP: <code>${esc(row.ip)}</code>\n` +
+          `📄 Страница: ${esc(row.path)}\n` +
+          `${device} · ${os}\n` +
+          `🔗 Источник: ${esc(row.ref) || 'прямая ссылка'}`
+        ) ? 'sent' : 'failed';
+      }
+
+      try {
+        appendVisit(row);
+      } catch (err) {
+        console.error('[track] не удалось записать визит:', err.code || 'error');
+      }
     })().catch(() => { /* фоновые ошибки не трогают ответ */ });
   });
 }

@@ -72,6 +72,7 @@ test('POST /track принимает визит, отвечает 204 и пиш�
   assert.strictEqual(row.country, 'Россия');
   assert.strictEqual(row.city, 'Москва');
   assert.strictEqual(row.ua, 'TestAgent/1.0');
+  assert.strictEqual(row.tg, 'off', 'без токена Telegram статус off');
 });
 
 test('POST /track отбивает тело больше лимита кодом 413', async () => {
